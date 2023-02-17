@@ -14,6 +14,8 @@ pub enum Error {
     IoError(#[from] io::Error),
     #[error("Internal")]
     Internal(String),
+    #[error("Block Too Large")]
+    TooLarge(usize),
 }
 
 // Can't use AsRef<str> here because io::Error does too
