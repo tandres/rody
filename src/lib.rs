@@ -7,10 +7,11 @@ pub use crate::error::{Error, Result};
 
 mod error;
 
-pub fn store(map: &mut MmapMut, header: Header) {
+pub fn store(map: &mut MmapMut, header: Header) -> Result<()> {
     let mut buf: &mut [u8] = map.as_mut();
-    buf.write(header.as_ref()).unwrap();
-    map.flush().unwrap()
+    buf.write(header.as_ref())?;
+    map.flush()?;
+    Ok(())
 }
 
 
@@ -52,8 +53,9 @@ impl Header {
     fn from_map<'a>(map: &'a Mmap) -> Result<&'a Header> {
         let ptr = map.as_ref() as *const [u8];
         let ptr = ptr.cast::<Header>();
-        let potential_header = unsafe { ptr.as_ref().unwrap() };
-        potential_header.validate()
+        let header : Option<&'a Header> = unsafe { ptr.as_ref() };
+        let header = header.ok_or_else(|| Error::from("Pointer conversion failed"))?;
+        header.validate()
     }
 
     fn validate(&self) -> Result<&Self> {
