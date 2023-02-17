@@ -1,7 +1,11 @@
-use std::{fmt::Debug, io::Write, mem::size_of, slice::from_raw_parts};
+
 
 use memmap::{Mmap, MmapMut};
+use std::{fmt::Debug, io::Write, mem::size_of, slice::from_raw_parts};
 
+pub use crate::error::{Error, Result};
+
+mod error;
 
 pub fn store(map: &mut MmapMut, header: Header) {
     let mut buf: &mut [u8] = map.as_mut();
@@ -45,20 +49,21 @@ impl Header {
         }
     }
 
-    fn from_map<'a>(map: &'a Mmap) -> &'a Header {
+    fn from_map<'a>(map: &'a Mmap) -> Result<&'a Header> {
         let ptr = map.as_ref() as *const [u8];
         let ptr = ptr.cast::<Header>();
-        unsafe { ptr.as_ref().unwrap() }
+        let potential_header = unsafe { ptr.as_ref().unwrap() };
+        potential_header.validate()
     }
 
-    fn validate(&self) -> bool {
+    fn validate(&self) -> Result<&Self> {
         if self.magic != Self::FILE_MAGIC {
-            return false;
+            return Err(Error::BadMagic);
         }
         if self.version != 1 {
-            return false;
+            return Err(Error::InvalidVersion);
         }
-        return true;
+        return Ok(self)
     }
 }
 
@@ -73,8 +78,7 @@ mod tests {
         let header = Header::new();
         store(&mut wmap, header);
         let rmap = wmap.make_read_only().unwrap();
-        let rheader = Header::from_map(&rmap);
+        let rheader = Header::from_map(&rmap).unwrap();
         println!("{rheader:#?}");
-        assert!(rheader.validate());
     }
 }
