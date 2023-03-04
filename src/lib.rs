@@ -19,6 +19,7 @@ pub fn store(map: &mut MmapMut, header: Header) -> Result<()> {
 pub struct Header {
     magic : u32,
     version : u32,
+    blocklist_size : u32,
 }
 
 impl Debug for Header {
@@ -41,21 +42,34 @@ impl AsRef<[u8]> for Header {
     }
 }
 
+
 impl Header {
     const FILE_MAGIC: u32 = 0x55AA33BB;
-    fn new() -> Self {
+    fn new(blocklist_size: usize) -> Self {
         Self {
             magic : Self::FILE_MAGIC,
             version : 1,
+            blocklist_size,
         }
     }
 
     fn from_map<'a>(map: &'a Mmap) -> Result<&'a Header> {
-        let ptr = map.as_ref() as *const [u8];
+        //let ptr = map.as_ref() as *const [u8];
+        Self::from_buf(map.as_ref())
+    }
+
+    fn from_buf<'a>(buf: &'a [u8]) -> Result<&'a Header> {
+        let ptr = buf as *const [u8];
         let ptr = ptr.cast::<Header>();
         let header : Option<&'a Header> = unsafe { ptr.as_ref() };
         let header = header.ok_or_else(|| Error::from("Pointer conversion failed"))?;
         header.validate()
+    }
+
+    fn write_out<W: Write>(&self, writer: W) -> Result<usize> {
+        writer.write(self.magic.to_le_bytes())?;
+        writer.write(self.version.to_le_bytes())?;
+        writer.write(self.blocklist_size.to_le_bytes())?;
     }
 
     fn validate(&self) -> Result<&Self> {
@@ -66,6 +80,42 @@ impl Header {
             return Err(Error::InvalidVersion);
         }
         return Ok(self)
+    }
+}
+
+#[repr(C, packed)]
+pub struct BlockDesc {
+    block_size: u32,
+    count: u32,
+    offset: u32,
+}
+
+impl BlockDesc {
+    fn from_map<'a>(map: &'a Mmap, offset: usize) -> Result<&'a BlockDesc> {
+        Self::from_buf(map.as_ref())
+    }
+
+    fn from_buf<'a>(buf: &'a [u8]) -> Result<&'a BlockDesc> {
+        let ptr = buf as *const [u8];
+        let ptr = ptr.cast::<BlockDesc>();
+        let blockdesc: Option<&'a BlockDesc> = unsafe { ptr.as_ref() };
+        let header = header.ok_or_else(|| Error::from("Pointer conversion failed"))?;
+        blockdesc.validate(buf.len())
+    }
+
+    fn validate(&self, buffer_length: usize) -> Result<&Self> {
+        let total_size = self.block_size * self.count;
+        if self.offset + total_size > buffer_length {
+            Err(format!("Blocklist ({} blocks at {} bytes each) would overrun buffer ({buffer_length} bytes)", self.count, self.block_size).into())
+        } else {
+            Ok(self)
+        } 
+    }
+}
+
+impl From<'a, &[u8]> for &BlockDesc {
+    fn from(value: &[u8]) -> &BlockDesc {
+        BlockDesc::from_buf(value)
     }
 }
 
@@ -93,6 +143,10 @@ impl Collector {
         let mut shelf = self.shelves.entry(block_len).or_insert(Shelf::new(block_len));
         shelf.add_block(block);
         Ok(())
+    }
+
+    pub fn press<F: Write>(&self, writer: F) -> Result<()> {
+        
     }
 }
 
@@ -135,16 +189,14 @@ mod tests {
     use tempfile::tempfile;
     use rand::{Rng, rngs::SmallRng, SeedableRng};
 
-    fn generate_test_data(size_count: Vec<(usize, usize)>, rng: &mut impl Rng) -> Vec<Vec<Vec<u8>>> {
+    fn generate_test_data(size_count: Vec<(usize, usize)>, rng: &mut impl Rng) -> Vec<Vec<u8>> {
         let mut data = Vec::new();
         for (size, count) in size_count {
-            let mut buffers = Vec::new();
             for _ in 0..count {
                 let mut buffer = Vec::with_capacity(size);
                 rng.fill(buffer.as_mut_slice());
-                buffers.push(buffer);
+                data.push(buffer);
             }
-            data.push(buffers);
         }
         data
     }
@@ -164,8 +216,11 @@ mod tests {
         let data_size_count = vec![(5, 3), (7, 2), (10, 1), (25, 6), (39, 4)];
         let mut rng = SmallRng::seed_from_u64(42);
         let data = generate_test_data(data_size_count, &mut rng);
+        let collector = Collector::new();
+        for buffer in data {
+            collector.add(buffer).unwrap();
+        }
+
         
     }
-
-    
 }
