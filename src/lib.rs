@@ -1,7 +1,7 @@
 
 
 use memmap::{Mmap, MmapMut};
-use std::{collections::HashMap, fmt::Debug, io::Write, mem::size_of, slice::from_raw_parts};
+use std::{collections::BTreeMap, fmt::Debug, io::Write, mem::size_of, slice::from_raw_parts};
 
 pub use crate::error::{Error, Result};
 
@@ -46,6 +46,7 @@ impl AsRef<[u8]> for Header {
 impl Header {
     const FILE_MAGIC: u32 = 0x55AA33BB;
     fn new(blocklist_size: usize) -> Self {
+        let blocklist_size = blocklist_size as u32;
         Self {
             magic : Self::FILE_MAGIC,
             version : 1,
@@ -54,7 +55,6 @@ impl Header {
     }
 
     fn from_map<'a>(map: &'a Mmap) -> Result<&'a Header> {
-        //let ptr = map.as_ref() as *const [u8];
         Self::from_buf(map.as_ref())
     }
 
@@ -66,10 +66,11 @@ impl Header {
         header.validate()
     }
 
-    fn write_out<W: Write>(&self, writer: W) -> Result<usize> {
-        writer.write(self.magic.to_le_bytes())?;
-        writer.write(self.version.to_le_bytes())?;
-        writer.write(self.blocklist_size.to_le_bytes())?;
+    fn write_out<W: Write>(&self, writer: &mut W) -> Result<usize> {
+        let mut size = writer.write(&self.magic.to_le_bytes())?;
+        size += writer.write(&self.version.to_le_bytes())?;
+        size += writer.write(&self.blocklist_size.to_le_bytes())?;
+        Ok(size)
     }
 
     fn validate(&self) -> Result<&Self> {
@@ -99,29 +100,33 @@ impl BlockDesc {
         let ptr = buf as *const [u8];
         let ptr = ptr.cast::<BlockDesc>();
         let blockdesc: Option<&'a BlockDesc> = unsafe { ptr.as_ref() };
-        let header = header.ok_or_else(|| Error::from("Pointer conversion failed"))?;
+        let blockdesc = blockdesc.ok_or_else(|| Error::from("Pointer conversion failed"))?;
         blockdesc.validate(buf.len())
     }
 
     fn validate(&self, buffer_length: usize) -> Result<&Self> {
         let total_size = self.block_size * self.count;
+        let buffer_length = buffer_length as u32;
         if self.offset + total_size > buffer_length {
-            Err(format!("Blocklist ({} blocks at {} bytes each) would overrun buffer ({buffer_length} bytes)", self.count, self.block_size).into())
+            let count = self.count;
+            let size = self.block_size;
+            Err(format!("Blocklist ({count} blocks at {size} bytes each) would overrun buffer ({buffer_length} bytes)").into())
         } else {
             Ok(self)
         } 
     }
 }
 
-impl From<'a, &[u8]> for &BlockDesc {
-    fn from(value: &[u8]) -> &BlockDesc {
+impl<'a> TryFrom<&'a [u8]> for &'a BlockDesc {
+    type Error = Error;
+    fn try_from(value: &'a [u8]) -> Result<&'a BlockDesc> {
         BlockDesc::from_buf(value)
     }
 }
 
 pub struct Collector {
     max_size: usize,
-    shelves: HashMap<usize, Shelf>,
+    shelves: BTreeMap<usize, Shelf>,
 }
 
 impl Collector {
@@ -129,7 +134,7 @@ impl Collector {
     pub fn new() -> Self {
         Collector { 
             max_size: Self::DEFAULT_MAX_SIZE, 
-            shelves: HashMap::new(),
+            shelves: BTreeMap::new(),
         }
     }
 
@@ -140,19 +145,33 @@ impl Collector {
             return Err(Error::TooLarge(block_len));
         }
         let block = Block::new(buf);
-        let mut shelf = self.shelves.entry(block_len).or_insert(Shelf::new(block_len));
+        let shelf = self.shelves.entry(block_len).or_insert(Shelf::new(block_len));
         shelf.add_block(block);
         Ok(())
     }
 
-    pub fn press<F: Write>(&self, writer: F) -> Result<()> {
-        
+    pub fn press<F: Write>(&self, writer: &mut F) -> Result<()> {
+        let header = Header::new(self.shelves.len());
+        header.write_out(writer)?;
+        for (size, blocks) in self.shelves.iter() {
+            println!("{size} {:?}", blocks);
+        }
+        Ok(())
     }
 }
 
 struct Shelf {
     block_size: usize,
     blocks: Vec<Block>,
+}
+
+impl Debug for Shelf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Shelf")
+            .field("block_size", &self.block_size)
+            .field("blocks", &self.blocks.len())
+            .finish()
+    }
 }
 
 impl Shelf {
@@ -193,7 +212,7 @@ mod tests {
         let mut data = Vec::new();
         for (size, count) in size_count {
             for _ in 0..count {
-                let mut buffer = Vec::with_capacity(size);
+                let mut buffer = vec![0; size];
                 rng.fill(buffer.as_mut_slice());
                 data.push(buffer);
             }
@@ -203,24 +222,25 @@ mod tests {
 
     #[test]
     fn header_map_test() {
-        let mut wmap = memmap::MmapMut::map_anon(size_of::<Header>()).unwrap();
-        let header = Header::new();
-        store(&mut wmap, header).unwrap();
-        let rmap = wmap.make_read_only().unwrap();
+        let mut output = tempfile().unwrap();
+        let header = Header::new(0);
+        header.write_out(&mut output).unwrap();
+        //store(&mut wmap, header).unwrap();
+        let rmap = unsafe { memmap::Mmap::map(&output) }.unwrap();
         let rheader = Header::from_map(&rmap).unwrap();
         println!("{rheader:#?}");
     }
 
     #[test]
     fn random_data() {
+        let mut output = tempfile().unwrap();
         let data_size_count = vec![(5, 3), (7, 2), (10, 1), (25, 6), (39, 4)];
         let mut rng = SmallRng::seed_from_u64(42);
         let data = generate_test_data(data_size_count, &mut rng);
-        let collector = Collector::new();
+        let mut collector = Collector::new();
         for buffer in data {
             collector.add(buffer).unwrap();
         }
-
-        
+        collector.press(&mut output).unwrap(); 
     }
 }
