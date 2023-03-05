@@ -85,21 +85,21 @@ impl Header {
 }
 
 #[repr(C, packed)]
-pub struct BlockDesc {
+pub struct RunDesc {
     block_size: u32,
     count: u32,
     offset: u32,
 }
 
-impl BlockDesc {
-    fn from_map<'a>(map: &'a Mmap, offset: usize) -> Result<&'a BlockDesc> {
+impl RunDesc {
+    fn from_map<'a>(map: &'a Mmap, offset: usize) -> Result<&'a RunDesc> {
         Self::from_buf(map.as_ref())
     }
 
-    fn from_buf<'a>(buf: &'a [u8]) -> Result<&'a BlockDesc> {
+    fn from_buf<'a>(buf: &'a [u8]) -> Result<&'a RunDesc> {
         let ptr = buf as *const [u8];
-        let ptr = ptr.cast::<BlockDesc>();
-        let blockdesc: Option<&'a BlockDesc> = unsafe { ptr.as_ref() };
+        let ptr = ptr.cast::<RunDesc>();
+        let blockdesc: Option<&'a RunDesc> = unsafe { ptr.as_ref() };
         let blockdesc = blockdesc.ok_or_else(|| Error::from("Pointer conversion failed"))?;
         blockdesc.validate(buf.len())
     }
@@ -115,12 +115,19 @@ impl BlockDesc {
             Ok(self)
         } 
     }
+
+    fn write_out<W: Write>(&self, writer: &mut W) -> Result<usize> {
+        let mut size = writer.write(&self.block_size.to_le_bytes())?;
+        size += writer.write(&self.count.to_le_bytes())?;
+        size += writer.write(&self.offset.to_le_bytes())?;
+        Ok(size)
+    }
 }
 
-impl<'a> TryFrom<&'a [u8]> for &'a BlockDesc {
+impl<'a> TryFrom<&'a [u8]> for &'a RunDesc {
     type Error = Error;
-    fn try_from(value: &'a [u8]) -> Result<&'a BlockDesc> {
-        BlockDesc::from_buf(value)
+    fn try_from(value: &'a [u8]) -> Result<&'a RunDesc> {
+        RunDesc::from_buf(value)
     }
 }
 
@@ -151,10 +158,19 @@ impl Collector {
     }
 
     pub fn press<F: Write>(&self, writer: &mut F) -> Result<()> {
+        let mut current_offset = 0;
+        let mut bulk_offset = 0;
         let header = Header::new(self.shelves.len());
-        header.write_out(writer)?;
-        for (size, blocks) in self.shelves.iter() {
-            println!("{size} {:?}", blocks);
+        current_offset += header.write_out(writer)?;
+        bulk_offset = self.shelves.len() * size_of::<RunDesc>();
+        for (_size, shelf) in self.shelves.iter() {
+            let run_desc = shelf.create_run_desc(bulk_offset);
+            bulk_offset += shelf.bulk_size();
+            current_offset += run_desc.write_out(writer)?;
+        }
+
+        for (_size, shelf) in self.shelves.iter() {
+            
         }
         Ok(())
     }
@@ -186,6 +202,22 @@ impl Shelf {
         assert_eq!(self.block_size, block.data.len());
         self.blocks.push(block); 
     }
+
+    fn create_run_desc(&self, offset: usize) -> RunDesc {
+        RunDesc {
+            block_size : self.block_size as u32,
+            count : self.blocks.len() as u32,
+            offset : offset as u32,
+        }
+    }
+
+    fn bulk_size(&self) -> usize {
+        if self.blocks.is_empty() {
+            0
+        } else {
+            self.blocks.len() * self.blocks[0].size()
+        }
+    }
 }
 
 struct Block {
@@ -199,6 +231,10 @@ impl Block {
             hash: 0,
             data: data.to_vec(),
         }
+    }
+
+    fn size(&self) -> usize {
+        size_of::<u32>() + self.data.len()
     }
 }
 
@@ -234,7 +270,7 @@ mod tests {
     #[test]
     fn random_data() {
         let mut output = tempfile().unwrap();
-        let data_size_count = vec![(5, 3), (7, 2), (10, 1), (25, 6), (39, 4)];
+        let data_size_count = vec![(7, 3), (5, 2), (10, 1), (25, 6), (39, 4)];
         let mut rng = SmallRng::seed_from_u64(42);
         let data = generate_test_data(data_size_count, &mut rng);
         let mut collector = Collector::new();
